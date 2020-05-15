@@ -317,7 +317,7 @@ def ed_rsa(directory='.', layers=[], test_size=1/2):
             codes_sim = torch.tensor(U.pairwise(S.stringsim, codes)).float().to(device)
             logging.info("Computing RSA correlation")
             cor_val = S.pearson_r(S.triu(trans_sim), S.triu(codes_sim))
-            result.append({'cor': cor_val, 'model': mode, 'layer': layer})
+            result.append({'cor': cor_val.item(), 'model': mode, 'layer': layer})
     return result
 
 def weighted_average_RSA(directory='.', layers=[], attention='linear', test_size=1/2,  attention_hidden_size=None, standardize=False, epochs=1, device='cpu'):
