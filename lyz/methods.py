@@ -295,15 +295,30 @@ def correlation_score(features, labels, size):
 
 def ed_rsa(directory='.', layers=[], test_size=1/2):
     from sklearn.model_selection import train_test_split
+    from nltk.tokenize import word_tokenize
+    from sklearn.preprocessing import LabelEncoder
+    def flatten(xss):
+        return [ x for xs in xss for x in xs ] 
     device = 'cpu'
     result = []
     logging.info("Loading transcription data")
     data = pickle.load(open("{}/global_input.pkl".format(directory), "rb"))
     trans = data['ipa']
+    words  = [ word_tokenize(x) for x in data['text'] ]
+    le = LabelEncoder()
+    le.fit(flatten(words))
+    text = [ le.transform(s) for s in words ]
     splitseed = random.randint(0, 1024)
-    _, trans = train_test_split(trans, test_size=test_size, random_state=splitseed)
-    logging.info("Computing edit distances for transcriptions")
+    _, trans, _, text = train_test_split(trans, text, test_size=test_size, random_state=splitseed)
+    logging.info("Converting word IDs to Unicode characters before computing edit distance")
+    text = [ ''.join(chr(i) for i in s) for s in text ] 
+    logging.info("Computing phoneme edit distances for transcriptions")
     trans_sim = torch.tensor(U.pairwise(S.stringsim, trans)).float().to(device)
+    logging.info("Computing word edit distance for text")
+    text_sim = torch.tensor(U.pairwise(S.stringsim, text)).float().to(device)
+    logging.info("Computing RSA correlation between phoneme strings and word sequences")
+    cor =  S.pearson_r(S.triu(trans_sim), S.triu(text_sim))
+    logging.info("RSA for phonemes vs words: {}".format(cor))
     for mode in ['trained', 'random']:
         for layer in layers:
             logging.info("Loading activations for {} {}".format(mode, layer))
@@ -315,9 +330,12 @@ def ed_rsa(directory='.', layers=[], test_size=1/2):
             codes = [ ''.join(collapse_runs([ chr(x) for x in item.argmax(axis=1)])) for item in act ]
             logging.info("Computing edit distances for codes")
             codes_sim = torch.tensor(U.pairwise(S.stringsim, codes)).float().to(device)
-            logging.info("Computing RSA correlation")
-            cor_val = S.pearson_r(S.triu(trans_sim), S.triu(codes_sim))
-            result.append({'cor': cor_val.item(), 'model': mode, 'layer': layer})
+            logging.info("Computing RSA correlation with phoneme strings")
+            cor_phoneme = S.pearson_r(S.triu(trans_sim), S.triu(codes_sim))
+            result.append({'cor': cor_phoneme.item(), 'model': mode, 'layer': layer, 'reference': 'phoneme'})
+            logging.info("Computing RSA correlation with word sequences")
+            cor_word = S.pearson_r(S.triu(text_sim), S.triu(codes_sim))
+            result.append({'cor': cor_word.item(), 'model': mode, 'layer': layer, 'reference': 'word'})
     return result
 
 def weighted_average_RSA(directory='.', layers=[], attention='linear', test_size=1/2,  attention_hidden_size=None, standardize=False, epochs=1, device='cpu'):
