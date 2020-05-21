@@ -107,15 +107,16 @@ def local_diagnostic(config):
     for run in runs:
         logging.info("Starting run {}".format(run))
         data_mfcc = pickle.load(open('{}/local_input.pkl'.format(directory), 'rb'))
-        for mode in ['random', 'trained']:
-            logging.info("Fitting local classifier for mfcc")
-            result  = local_classifier(data_mfcc['features'], data_mfcc['labels'], epochs=config['epochs'], device='cuda:0', hidden=config['hidden'])
-            logging.info("Result for {}, {} = {}".format(mode, 'mfcc', result['acc']))
-            result['model'] = mode
-            result['layer'] = 'mfcc'
-            result['run'] = run
-            output.append(result)
-            for layer in config['layers']:
+        for mode in ['trained', 'random']:
+            if 'mfcc' in config['layers']:
+                logging.info("Fitting local classifier for mfcc")
+                result  = local_classifier(data_mfcc['features'], data_mfcc['labels'], epochs=config['epochs'], device='cuda:0', hidden=config['hidden'])
+                logging.info("Result for {}, {} = {}".format(mode, 'mfcc', result['acc']))
+                result['model'] = mode
+                result['layer'] = 'mfcc'
+                result['run'] = run
+                output.append(result)
+            for layer in set(config['layers'])-set(['mfcc']):
                 data = pickle.load(open('{}/local_{}_{}.pkl'.format(directory, mode, layer), 'rb'))
                 logging.info("Fitting local classifier for {}, {}".format(mode, layer))
                 result = local_classifier(data[layer]['features'], data[layer]['labels'], epochs=config['epochs'], device='cuda:0', hidden=config['hidden'])
