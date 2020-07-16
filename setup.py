@@ -2,7 +2,7 @@
 from setuptools import setup
 
 setup(name='lyz',
-      version='0.1',
+      version='0.2',
       description='Analysis methods for neural representations',
       url='https://github.com/gchrupala/lyz',
       author='Grzegorz Chrupała',
