@@ -15,6 +15,6 @@ setup(name='lyz',
           'torchvision>=0.4.0',
           'numpy>=1.17.2',
           'scikit-learn',
-          'ursa' @ git+https://github.com/gchrupala/ursa.git@master,
+          'ursa' @ git+https://github.com/gchrupala/ursa.git@master
       ]
      )
