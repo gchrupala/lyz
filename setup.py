@@ -16,6 +16,6 @@ setup(name='lyz',
           'numpy>=1.17.2',
           'scikit-learn',
           'plotnine',
-          'ursa'
+          'ursa @ git+https://github.com/gchrupala/ursa#egg=ursa'
       ]
      )
