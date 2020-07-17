@@ -15,6 +15,7 @@ setup(name='lyz',
           'torchvision>=0.4.0',
           'numpy>=1.17.2',
           'scikit-learn',
+          'plotnine',
           'ursa'
       ]
      )
