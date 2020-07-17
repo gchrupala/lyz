@@ -1,5 +1,5 @@
 # encoding: utf-8
-from setuptools import setup
+from setuptools import setup, find_packages
 
 setup(name='lyz',
       version='0.2',
@@ -9,6 +9,7 @@ setup(name='lyz',
       author_email='g.chrupala@uvt.nl',
       license='MIT',
       zip_safe=False,
+      packages=find_packages(exclude='test'),
       install_requires=[
           'torch>=1.2.0',
           'torchvision>=0.4.0',
