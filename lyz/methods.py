@@ -10,7 +10,7 @@ import pandas as pd
 import ursa.similarity as S
 import ursa.util as U
 import pickle
-
+DECILES = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 def analyze(output_root_dir, layers, nb_samples=70000):
     output_dir = Path(output_root_dir) / 'attn'
@@ -294,7 +294,7 @@ def correlation_score(features, labels, size):
     x_sim = 1 - paired_cosine_distances(x[: size], x[size :])
     return pearsonr(x_sim, y_sim)[0]
 
-def ed_rsa(directory='.', layers=[], test_size=1/2):
+def ed_rsa(directory='.', layers=[], test_size=1/2, quantiles=DECILES):
     from sklearn.model_selection import train_test_split
     from nltk.tokenize import word_tokenize
     from sklearn.preprocessing import LabelEncoder
@@ -303,20 +303,25 @@ def ed_rsa(directory='.', layers=[], test_size=1/2):
     device = 'cpu'
     result = []
     logging.info("Loading transcription data")
-    data = pickle.load(open("{}/global_input.pkl".format(directory), "rb"))
-    trans = data['ipa']
-    words  = [ word_tokenize(x) for x in data['text'] ]
+    data_in = pickle.load(open("{}/global_input.pkl".format(directory), "rb"))
+    trans = data_in['ipa']
+    aid = data_in['audio_id']
+    words  = [ word_tokenize(x) for x in data_in['text'] ]
     le = LabelEncoder()
     le.fit(flatten(words))
     text = [ le.transform(s) for s in words ]
     splitseed = random.randint(0, 1024)
-    _, trans, _, text = train_test_split(trans, text, test_size=test_size, random_state=splitseed)
+    _, aid, _, trans, _, text = train_test_split(aid, trans, text, test_size=test_size, random_state=splitseed)
     logging.info("Converting word IDs to Unicode characters before computing edit distance")
     text = [ ''.join(chr(i) for i in s) for s in text ] 
     logging.info("Computing phoneme edit distances for transcriptions")
     trans_sim = torch.tensor(U.pairwise(S.stringsim, trans)).float().to(device)
     logging.info("Computing word edit distance for text")
     text_sim = torch.tensor(U.pairwise(S.stringsim, text)).float().to(device)
+    logging.info("Saving metadata and similarity matrices for transcriptions.")
+    torch.save(aid, "{}/aid.pt".format(directory))
+    torch.save(trans_sim, "{}/trans_sim.pt".format(directory))
+    torch.save(text_sim, "{}/text_sim.pt".format(directory))
     logging.info("Computing RSA correlation between phoneme strings and word sequences")
     cor =  S.pearson_r(S.triu(trans_sim), S.triu(text_sim))
     logging.info("RSA for phonemes vs words: {}".format(cor))
@@ -331,13 +336,32 @@ def ed_rsa(directory='.', layers=[], test_size=1/2):
             codes = [ ''.join(collapse_runs([ chr(x) for x in item.argmax(axis=1)])) for item in act ]
             logging.info("Computing edit distances for codes")
             codes_sim = torch.tensor(U.pairwise(S.stringsim, codes)).float().to(device)
+            logging.info("Saving similarity matrix for {} {}".format(mode, layer))
+            torch.save(codes_sim, "{}/codes_sim_{}_{}.pt".format(directory, mode, layer))
             logging.info("Computing RSA correlation with phoneme strings")
             cor_phoneme = S.pearson_r(S.triu(trans_sim), S.triu(codes_sim))
-            result.append({'cor': cor_phoneme.item(), 'model': mode, 'layer': layer, 'reference': 'phoneme'})
+            result.append({'cor': cor_phoneme.item(), 'model': mode, 'layer': layer, 'reference': 'phoneme', 'by_size': False})
             logging.info("Computing RSA correlation with word sequences")
             cor_word = S.pearson_r(S.triu(text_sim), S.triu(codes_sim))
-            result.append({'cor': cor_word.item(), 'model': mode, 'layer': layer, 'reference': 'word'})
+            result.append({'cor': cor_word.item(), 'model': mode, 'layer': layer, 'reference': 'word', 'by_size': False})
+            for record in ed_rsa_by_size(data_in, aid, trans_sim, text_sim, codes_sim, quantiles=quantiles):
+                record['model'] = mode
+                record['layer'] = layer
+                result.append(record)
     return result
+
+def ed_rsa_by_size(data, aid, trans_sim, text_sim, codes_sim, quantiles=DECILES):
+    size = np.array([len(data['audio'][i]) for i in range(len(data['audio'])) if data['audio_id'][i] in aid ])
+    qs = np.quantile(size, quantiles)
+    for i in range(1, len(qs)):
+        j = (size > qs[i-1]) & (size <= qs[i])
+        tr = trans_sim[j, :][:, j]
+        te = text_sim[j, :][:, j]
+        co = codes_sim[j, :][:, j]
+        cor_phoneme = S.pearson_r(S.triu(tr), S.triu(co))
+        cor_word  = S.pearson_r(S.triu(te), S.triu(co))
+        yield dict(quantile=quantiles[i], gt=qs[i-1], leq=qs[i], cor=cor_phoneme.item(), reference='phoneme', by_size=True)
+        yield dict(quantile=quantiles[i], gt=qs[i-1], leq=qs[i], cor=cor_word.item(),  reference='word', by_size=True)
 
 def weighted_average_RSA(directory='.', layers=[], attention='linear', test_size=1/2,  attention_hidden_size=None, standardize=False, epochs=1, device='cpu'):
     from sklearn.model_selection import train_test_split
