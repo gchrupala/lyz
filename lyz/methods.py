@@ -11,6 +11,7 @@ import ursa.similarity as S
 import ursa.util as U
 import pickle
 DECILES = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+TERCILES = (0.0, 1/3, 2/3, 1.0)
 
 def analyze(output_root_dir, layers, nb_samples=70000):
     output_dir = Path(output_root_dir) / 'attn'
@@ -311,10 +312,12 @@ def ed_rsa(directory='.', layers=[], test_size=1/2, quantiles=DECILES):
     le.fit(flatten(words))
     text = [ le.transform(s) for s in words ]
     splitseed = random.randint(0, 1024)
+    logging.info("Split seed: {}".format(splitseed))
     _, aid, _, trans, _, text = train_test_split(aid, trans, text, test_size=test_size, random_state=splitseed)
     logging.info("Converting word IDs to Unicode characters before computing edit distance")
     text = [ ''.join(chr(i) for i in s) for s in text ] 
     logging.info("Computing phoneme edit distances for transcriptions")
+    # FIXME remove the .float nonsense and rerun!
     trans_sim = torch.tensor(U.pairwise(S.stringsim, trans)).float().to(device)
     logging.info("Computing word edit distance for text")
     text_sim = torch.tensor(U.pairwise(S.stringsim, text)).float().to(device)
@@ -497,7 +500,7 @@ def weighted_average_RSA_partial(directory='.', layers=[], test_size=1/2,  stand
     Edit_val  = S.triu(edit_sim_val).cpu().numpy()
     Image_val = S.triu(sim_image_val).cpu().numpy()
     Act_val   = S.triu(avg_pool_sim_val).cpu().numpy()
-    e_full, e_base, e_mean = partial_r2(Edit, Act, Image, Edit_val, Act_val, Image_val)
+    e_full, e_base, e_mean, _ = partial_r2(Edit, Act, Image, Edit_val, Act_val, Image_val)
     logging.info("Full, base, mean error: {} {}".format(e_full, e_base, e_mean))
     r2 =  (e_base - e_full)/e_base
     this =  {'epoch': None, 'error': e_full, 'baseline': e_base, 'error_mean': e_mean, 'r2': r2  }
@@ -522,7 +525,7 @@ def weighted_average_RSA_partial(directory='.', layers=[], test_size=1/2,  stand
             avg_pool_sim_val = S.cosine_matrix(avg_pool_val, avg_pool_val)
             Act   = S.triu(avg_pool_sim).cpu().numpy()
             Act_val   = S.triu(avg_pool_sim_val).cpu().numpy()
-            e_full, e_base, e_mean = partial_r2(Edit, Act, Image, Edit_val, Act_val, Image_val)
+            e_full, e_base, e_mean, _ = partial_r2(Edit, Act, Image, Edit_val, Act_val, Image_val)
             logging.info("Full, base, mean error: {} {}".format(e_full, e_base, e_mean))
             r2 =  (e_base - e_full)/e_base
             this =  {'epoch': None, 'error': e_full, 'baseline': e_base, 'error_mean': e_mean, 'r2': r2  }
@@ -532,26 +535,159 @@ def weighted_average_RSA_partial(directory='.', layers=[], test_size=1/2,  stand
             logging.info("Partial R2 on val: {} at epoch {}".format(result[-1]['r2'], result[-1]['epoch']))
     return result
 
+def partial_rsa_by_size(baseline='vis'):
+    from platalea.dataset import Flickr8KData
+    logging.basicConfig(level=logging.INFO)
+    # FIXME this should be handled at model loadtime ideally
+    val = Flickr8KData(root='data/datasets/flickr8k/', split='val', feature_fname='mfcc_delta_features.pt')
+    Flickr8KData.init_vocabulary(val)
+    splitseed = random.randint(0, 1024)
+    records = []
+    for size in [5, 1]:
+        for codebook in [32, 64, 128, 256, 512, 1024]:
+            logging.info("Partialing for size={}, codebook={}".format(size, codebook))
+            r = partial_rsa("experiments/vq-{}-q1/wordgrams{}".format(codebook, size),
+                            baseline=baseline,
+                            splitseed=splitseed)
+            r['size']     = size
+            r['codebook'] = codebook
+            records.append(r)
+    data = pd.DataFrame.from_records(records)
+    data.to_csv("partial_rsa_by_size-{}.csv".format(baseline), header=True, index=False)
+
+def normalize_text(text):
+    """Replaces punctuation characters with spaces, then collapses multiple spaces to a single one, 
+       then maps to lowercase."""
+    import string
+    return ' '.join(''.join([ ' ' if c in string.punctuation else c for c in text ]).split()).lower()
+
+def partial_rsa(directory, mode='trained', layer='codebook', baseline='vis', splitseed=None):
+    from sklearn.model_selection import train_test_split
+    from platalea.dataset import Flickr8KData
+    logging.info("Loading data")
+    data_in = pickle.load(open("{}/global_input.pkl".format(directory), "rb"))
+    trans = data_in['ipa']    
+    texts = [ normalize_text(x) for x in data_in['text'] ]
+    
+    if baseline == 'text':
+        textdir = "/roaming/gchrupal/verdigris/platalea.vq/experiments/text-image/"
+        result = [ json.loads(line) for line in open(textdir + "/result.json") ]
+        best = sorted(result, key=lambda x: x['recall']['10'], reverse=True)[0]['epoch']
+        net = torch.load("{}/net.{}.pt".format(textdir, best))
+        att = torch.tensor(net.embed_text(list(texts))).float()
+    elif baseline=='vis':
+        logging.info("Computing visual representations")
+        val = Flickr8KData(root='data/datasets/flickr8k/', split='val',
+                           feature_fname='mfcc_delta_features.pt')
+        Flickr8KData.init_vocabulary(val)
+        utt2image = { normalize_text(item['gloss']) : item['image'].double() for item in val }
+        str2image = {}
+        for text in set(texts):
+            for (utt, img) in utt2image.items():
+                if text in utt:
+                    if text in str2image:
+                        str2image[text]['sum'] += img
+                        str2image[text]['N'] += 1.0
+                    else:
+                        str2image[text] = {}
+                        str2image[text]['sum'] = img
+                        str2image[text]['N'] = 1.0
+            #logging.info("Max value for {}: {}".format(text, str2image[text]['sum'].max().item()))            
+        logging.info("Averaging images")
+        att = torch.stack([ str2image[text]['sum']/str2image[text]['N'] for text in texts ])
+        logging.info("att size: {}; inf: {}; nan: {}".format(product(att.numpy().shape),
+                                                           np.isinf(att.numpy()).sum(),
+                                                           np.isnan(att.numpy()).sum()))
+    
+        
+    data = pickle.load(open("{}/global_{}_{}.pkl".format(directory, mode, layer), "rb"))
+    codes = [ ''.join(collapse_runs([ chr(x) for x in item.argmax(axis=1)])) for item in data[layer] ]
+    logging.info("Splitting into train and test")
+    if splitseed is None:
+        splitseed = random.randint(0, 1024)
+    logging.info("Split seed: {}".format(splitseed))
+    att_t, att_v, codes_t, codes_v, trans_t, trans_v = train_test_split(att, codes, trans,
+                                                                        test_size=1/2,
+                                                                        random_state=splitseed)
+    
+    logging.info("Computing similarity matrices for...")
+    logging.info("... utterance embeddings")
+    att_t_sim = S.triu(S.cosine_matrix(att_t, att_t)).numpy()
+    att_v_sim = S.triu(S.cosine_matrix(att_v, att_v)).numpy()
+
+    logging.info("... codes")
+    codes_t_sim = U.triu(U.pairwise(S.stringsim, codes_t))
+    codes_v_sim = U.triu(U.pairwise(S.stringsim, codes_v))
+    logging.info("... transcriptions")
+    trans_t_sim = U.triu(U.pairwise(S.stringsim, trans_t))
+    trans_v_sim = U.triu(U.pairwise(S.stringsim, trans_v))
+    logging.info("Regressing and computing R2 scores")
+    R = partial_r2(Y=codes_t_sim, X=trans_t_sim, Z=att_t_sim, y=codes_v_sim,
+                                                 x=trans_v_sim, z=att_v_sim)
+    return R
+
+def product(xs):
+    z = 1
+    for x in xs:
+        z = z * x
+    return z
+    
+                
 def partial_r2(Y, X, Z, y, x, z):
+    import math
     from sklearn.linear_model import LinearRegression
     from sklearn.metrics import mean_squared_error
     from sklearn.metrics import r2_score
-    from scipy.stats import pearsonr
+    from ursa.similarity import pearson_r
+    def product(xs):
+        z = 1
+        for x in xs:
+            z = z * x
+        return z
+    
+    logging.info("Z size: {}; inf: {}; nan: {}".format(product(Z.shape),
+                                                       np.isinf(Z).sum(),
+                                                       np.isnan(Z).sum()))
+    
+    logging.info("z size: {}; inf: {}; nan: {}".format(product(z.shape),
+                                                       np.isinf(z).sum(),
+                                                       np.isnan(z).sum()))
+    assert np.all(np.isfinite(Y))
+    assert np.all(np.isfinite(X))
+    assert np.all(np.isfinite(Z))
+    assert np.all(np.isfinite(y))
+    assert np.all(np.isfinite(x))
+    assert np.all(np.isfinite(z))
     full = LinearRegression()
     full.fit(np.stack([X, Z], axis=1), Y)
     base = LinearRegression()
     base.fit(Z.reshape((-1, 1)), Y)
+    xonly = LinearRegression()
+    xonly.fit(X.reshape((-1, 1)), Y)
+    
     y_full = full.predict(np.stack([x, z], axis=1))
     y_base = base.predict(z.reshape((-1, 1)))
-    e_full = mean_squared_error(y, y_full)
-    e_base = mean_squared_error(y, y_base)
-    e_mean = mean_squared_error(y, np.repeat(Y.mean().item(), len(y)))
-    r_full = pearsonr(y, y_full)[0]
-    r_base = pearsonr(y, y_base)[0]
-    logging.info("Pearson's r full : {}".format(r_full))
-    logging.info("Pearson's r base : {}".format(r_base))
-    logging.info("Pearson's partial: {}".format(rer(r_full, r_base)))
-    return e_full.item(), e_base.item(), e_mean.item()
+    y_xonly = xonly.predict(x.reshape((-1, 1)))
+    e_full = mean_squared_error(y, y_full).item()
+    e_base = mean_squared_error(y, y_base).item()
+    e_xonly = mean_squared_error(y, y_xonly).item()
+    e_mean = mean_squared_error(y, np.repeat(Y.mean().item(), len(y))).item()
+    r_base = U.pearson_r(y, z)
+    r_xonly = U.pearson_r(y, x)
+
+    result = dict(e_full  = e_full,
+                  e_base  = e_base,
+                  e_mean  = e_mean,
+                  e_xonly = e_xonly,
+                  r_base  = r_base,
+                  r_xonly = r_xonly,
+                  r2_part = (e_base - e_full) / e_base,
+                  r2      = (e_mean - e_xonly) / e_mean
+                 )
+    logging.info("Record: {}".format(json.dumps(result, indent=2)))
+    return result
+
+                
 
 def normalize(X, X_val):
     device = X[0].device
