@@ -317,10 +317,9 @@ def ed_rsa(directory='.', layers=[], test_size=1/2, quantiles=DECILES):
     logging.info("Converting word IDs to Unicode characters before computing edit distance")
     text = [ ''.join(chr(i) for i in s) for s in text ] 
     logging.info("Computing phoneme edit distances for transcriptions")
-    # FIXME remove the .float nonsense and rerun!
-    trans_sim = torch.tensor(U.pairwise(S.stringsim, trans)).float().to(device)
+    trans_sim = torch.tensor(U.pairwise(S.stringsim, trans)).double().to(device)
     logging.info("Computing word edit distance for text")
-    text_sim = torch.tensor(U.pairwise(S.stringsim, text)).float().to(device)
+    text_sim = torch.tensor(U.pairwise(S.stringsim, text)).double().to(device)
     logging.info("Saving metadata and similarity matrices for transcriptions.")
     torch.save(aid, "{}/aid.pt".format(directory))
     torch.save(trans_sim, "{}/trans_sim.pt".format(directory))
@@ -338,7 +337,7 @@ def ed_rsa(directory='.', layers=[], test_size=1/2, quantiles=DECILES):
             logging.info("Converting to symbols and collapsing runs")
             codes = [ ''.join(collapse_runs([ chr(x) for x in item.argmax(axis=1)])) for item in act ]
             logging.info("Computing edit distances for codes")
-            codes_sim = torch.tensor(U.pairwise(S.stringsim, codes)).float().to(device)
+            codes_sim = torch.tensor(U.pairwise(S.stringsim, codes)).double().to(device)
             logging.info("Saving similarity matrix for {} {}".format(mode, layer))
             torch.save(codes_sim, "{}/codes_sim_{}_{}.pt".format(directory, mode, layer))
             logging.info("Computing RSA correlation with phoneme strings")
