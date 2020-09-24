@@ -145,7 +145,7 @@ def local_rsa(config):
 ### Global
 
 def global_rsa(config):
-    out = config['output'] / 'global_rsa.json'
+    out = Path(config['output']) / 'global_rsa.json'
     del config['output']
     result = []
     runs = range(1, config['runs']+1)
@@ -419,6 +419,7 @@ def collapse_runs(seq):
 
 
 def train_wa(edit_sim, edit_sim_val, stack, stack_val, attention='scalar', attention_hidden_size=None, epochs=1, device='cpu'):
+    import platalea.attention
     if attention == 'scalar':
         wa = platalea.attention.ScalarAttention(stack[0].size(2), hidden_size).to(device)
     elif attention == 'linear':
