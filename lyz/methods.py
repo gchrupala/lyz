@@ -113,7 +113,7 @@ def local_diagnostic(config):
                 logging.info("Fitting local classifier for mfcc")
                 result  = local_classifier(data_mfcc['features'], data_mfcc['labels'], epochs=config['epochs'], device='cuda:0', hidden=config['hidden'])
                 logging.info("Result for {}, {} = {}".format(mode, 'mfcc', result['acc']))
-                result['model'] = mode
+                result['mode'] = mode
                 result['layer'] = 'mfcc'
                 result['run'] = run
                 output.append(result)
@@ -122,7 +122,7 @@ def local_diagnostic(config):
                 logging.info("Fitting local classifier for {}, {}".format(mode, layer))
                 result = local_classifier(data[layer]['features'], data[layer]['labels'], epochs=config['epochs'], device='cuda:0', hidden=config['hidden'])
                 logging.info("Result for {}, {} = {}".format(mode, layer, result['acc']))
-                result['model'] = mode
+                result['mode'] = mode
                 result['layer'] = layer
                 result['run'] = run
                 output.append(result)
@@ -194,8 +194,8 @@ def plot_pooled_feature_std():
     data['layer_id'] = [ order.index(x) for x in data['layer'] ]
     # Only plot RNN layers
     data = data[data['layer'].str.startswith('rnn')]
-    z = data.groupby(['layer_id', 'model']).mean().reset_index()
-    g = ggplot(data, aes(x='layer_id', y='std', color='model')) + \
+    z = data.groupby(['layer_id', 'mode']).mean().reset_index()
+    g = ggplot(data, aes(x='layer_id', y='std', color='mode')) + \
                             geom_point(alpha=0.1, size=2, position='jitter', fill='white') +  \
                             geom_line(data=z, size=2, alpha=1.0) + \
                             ylab("Standard deviation") +\
@@ -210,7 +210,7 @@ def majority_multiclass(y):
     labels, counts = np.unique(y, return_counts=True)
     return labels[counts.argmax()]
 
-def local_classifier(features, labels, test_size=1/2, epochs=1, device='cpu', hidden=None, weight_decay=0.0):
+def local_classifier(features, labels, test_size=1/2, epochs=1, device='cpu', hidden=None, weight_decay=0.0, splitseed=None):
     """Fit classifier on part of features and labels and return accuracy on the other part."""
     from sklearn.preprocessing import StandardScaler, LabelEncoder
     from sklearn.model_selection import train_test_split
@@ -218,8 +218,9 @@ def local_classifier(features, labels, test_size=1/2, epochs=1, device='cpu', hi
     sil = labels != 'sil'
     features = features[sil]
     labels   = labels[sil]
-
-    splitseed = random.randint(0, 1024)
+    
+    if splitseed is None:
+        splitseed = random.randint(0, 1024)
 
     X, X_val, y, y_val = train_test_split(features, labels, test_size=test_size, random_state=splitseed)
 
@@ -295,7 +296,7 @@ def correlation_score(features, labels, size):
     x_sim = 1 - paired_cosine_distances(x[: size], x[size :])
     return pearsonr(x_sim, y_sim)[0]
 
-def ed_rsa(directory='.', layers=[], test_size=1/2, quantiles=DECILES):
+def ed_rsa(directory='.', layers=[], test_size=1/2, cached_datadir='.', info={}, splitseed=None):
     from sklearn.model_selection import train_test_split
     from nltk.tokenize import word_tokenize
     from sklearn.preprocessing import LabelEncoder
@@ -311,19 +312,30 @@ def ed_rsa(directory='.', layers=[], test_size=1/2, quantiles=DECILES):
     le = LabelEncoder()
     le.fit(flatten(words))
     text = [ le.transform(s) for s in words ]
-    splitseed = random.randint(0, 1024)
-    logging.info("Split seed: {}".format(splitseed))
-    _, aid, _, trans, _, text = train_test_split(aid, trans, text, test_size=test_size, random_state=splitseed)
-    logging.info("Converting word IDs to Unicode characters before computing edit distance")
     text = [ ''.join(chr(i) for i in s) for s in text ] 
-    logging.info("Computing phoneme edit distances for transcriptions")
-    trans_sim = torch.tensor(U.pairwise(S.stringsim, trans)).double().to(device)
-    logging.info("Computing word edit distance for text")
-    text_sim = torch.tensor(U.pairwise(S.stringsim, text)).double().to(device)
-    logging.info("Saving metadata and similarity matrices for transcriptions.")
+    try:
+        trans_sim_full = torch.load(Path(cached_datadir) / "trans_sim.pt")
+    except FileNotFoundError:
+        logging.info("Computing phoneme edit distances for transcriptions")
+        trans_sim_full = torch.tensor(U.pairwise(S.stringsim, trans)).double().to(device)
+        torch.save(trans_sim_full, Path(cached_datadir) / "trans_sim.pt")
+    try:   
+        text_sim_full  = torch.load(Path(cached_datadir) / "text_sim.pt")
+    except FileNotFoundError:
+        logging.info("Computing word edit distance for text")
+        text_sim_full = torch.tensor(U.pairwise(S.stringsim, text)).double().to(device)
+        torch.save(text_sim_full, Path(cached_datadir) / "text_sim.pt")
+    if splitseed is None:
+        splitseed = random.randint(0, 1024)
+    logging.info("Split seed: {}".format(splitseed))
+    _, index = train_test_split(range(len(aid)), test_size=test_size, random_state=splitseed)
+    aid = aid[index]
+    trans_sim = trans_sim_full[index,:][:,index]
+    text_sim  = text_sim_full[index,:][:, index]
+    
+    logging.info("Converting word IDs to Unicode characters before computing edit distance")
     torch.save(aid, "{}/aid.pt".format(directory))
-    torch.save(trans_sim, "{}/trans_sim.pt".format(directory))
-    torch.save(text_sim, "{}/text_sim.pt".format(directory))
+
     logging.info("Computing RSA correlation between phoneme strings and word sequences")
     cor =  S.pearson_r(S.triu(trans_sim), S.triu(text_sim))
     logging.info("RSA for phonemes vs words: {}".format(cor))
@@ -342,14 +354,10 @@ def ed_rsa(directory='.', layers=[], test_size=1/2, quantiles=DECILES):
             torch.save(codes_sim, "{}/codes_sim_{}_{}.pt".format(directory, mode, layer))
             logging.info("Computing RSA correlation with phoneme strings")
             cor_phoneme = S.pearson_r(S.triu(trans_sim), S.triu(codes_sim))
-            result.append({'cor': cor_phoneme.item(), 'model': mode, 'layer': layer, 'reference': 'phoneme', 'by_size': False})
+            result.append({'rsa': cor_phoneme.item(), 'mode': mode, 'layer': layer, 'reference': 'phoneme', **info})
             logging.info("Computing RSA correlation with word sequences")
             cor_word = S.pearson_r(S.triu(text_sim), S.triu(codes_sim))
-            result.append({'cor': cor_word.item(), 'model': mode, 'layer': layer, 'reference': 'word', 'by_size': False})
-            for record in ed_rsa_by_size(data_in, aid, trans_sim, text_sim, codes_sim, quantiles=quantiles):
-                record['model'] = mode
-                record['layer'] = layer
-                result.append(record)
+            result.append({'rsa': cor_word.item(), 'mode': mode, 'layer': layer, 'reference': 'word', **info})
     return result
 
 def ed_rsa_by_size(data, aid, trans_sim, text_sim, codes_sim, quantiles=DECILES):
@@ -385,8 +393,8 @@ def weighted_average_RSA(directory='.', layers=[], attention='linear', test_size
     edit_sim_val = torch.tensor(U.pairwise(S.stringsim, trans_val)).float().to(device)
     logging.info("Training for input features")
     this = train_wa(edit_sim, edit_sim_val, act, act_val, attention=attention, attention_hidden_size=None, epochs=epochs, device=device)
-    result.append({**this, 'model': 'random', 'layer': 'mfcc'})
-    result.append({**this, 'model': 'trained', 'layer': 'mfcc'})
+    result.append({**this, 'mode': 'random', 'layer': 'mfcc'})
+    result.append({**this, 'mode': 'trained', 'layer': 'mfcc'})
     del act, act_val
     logging.info("Maximum correlation on val: {} at epoch {}".format(result[-1]['cor'], result[-1]['epoch']))
     for mode in ["trained", "random"]:
@@ -400,7 +408,7 @@ def weighted_average_RSA(directory='.', layers=[], attention='linear', test_size
                 logging.info("Standardizing data")
                 act, act_val = normalize(act, act_val)
             this = train_wa(edit_sim, edit_sim_val, act, act_val, attention=attention, attention_hidden_size=None, epochs=epochs, device=device)
-            result.append({**this, 'model': mode, 'layer': layer})
+            result.append({**this, 'mode': mode, 'layer': layer})
             del act, act_val
             logging.info("Maximum correlation on val: {} at epoch {}".format(result[-1]['cor'], result[-1]['epoch']))
     return result
@@ -505,8 +513,8 @@ def weighted_average_RSA_partial(directory='.', layers=[], test_size=1/2,  stand
     r2 =  (e_base - e_full)/e_base
     this =  {'epoch': None, 'error': e_full, 'baseline': e_base, 'error_mean': e_mean, 'r2': r2  }
 
-    result.append({**this, 'model': 'random', 'layer': 'mfcc'})
-    result.append({**this, 'model': 'trained', 'layer': 'mfcc'})
+    result.append({**this, 'mode': 'random', 'layer': 'mfcc'})
+    result.append({**this, 'mode': 'trained', 'layer': 'mfcc'})
     del act, act_val
     logging.info("Partial r2 on val: {} at epoch {}".format(result[-1]['r2'], result[-1]['epoch']))
     for mode in ["trained", "random"]:
@@ -530,7 +538,7 @@ def weighted_average_RSA_partial(directory='.', layers=[], test_size=1/2,  stand
             r2 =  (e_base - e_full)/e_base
             this =  {'epoch': None, 'error': e_full, 'baseline': e_base, 'error_mean': e_mean, 'r2': r2  }
             pickle.dump(dict(Edit=Edit, Act=Act, Image=Image, Edit_val=Edit_val, Act_val=Act_val, Image_val=Image_val), open("fufi_{}_{}.pkl".format(mode, layer), "wb"), protocol=4)
-            result.append({**this, 'model': mode, 'layer': layer})
+            result.append({**this, 'mode': mode, 'layer': layer})
             del act, act_val
             logging.info("Partial R2 on val: {} at epoch {}".format(result[-1]['r2'], result[-1]['epoch']))
     return result
@@ -727,8 +735,8 @@ def weighted_average_diagnostic(directory='.', layers=[], attention='scalar', te
     model = PooledClassifier(input_size=X[0].shape[1],  output_size=y[0].shape[0],
                              hidden_size=hidden_size, attention_hidden_size=attention_hidden_size, attention=attention).to(device)
     this = train_classifier(model, X, y, X_val, y_val, epochs=epochs, factor=factor)
-    result.append({**this, 'model': 'random', 'layer': 'mfcc'})
-    result.append({**this, 'model': 'trained', 'layer': 'mfcc'})
+    result.append({**this, 'mode': 'random', 'layer': 'mfcc'})
+    result.append({**this, 'mode': 'trained', 'layer': 'mfcc'})
     del X, X_val
     logging.info("Maximum accuracy on val: {} at epoch {}".format(result[-1]['acc'], result[-1]['epoch']))
     for mode in ["trained", "random"]:
@@ -744,7 +752,7 @@ def weighted_average_diagnostic(directory='.', layers=[], attention='scalar', te
             model = PooledClassifier(input_size=X[0].shape[1], output_size=y[0].shape[0],
                                      hidden_size=hidden_size, attention_hidden_size=attention_hidden_size, attention=attention).to(device)
             this = train_classifier(model, X, y, X_val, y_val, epochs=epochs, factor=factor)
-            result.append({**this, 'model': mode, 'layer': layer})
+            result.append({**this, 'mode': mode, 'layer': layer})
             del X, X_val
             logging.info("Maximum accuracy on val: {} at epoch {}".format(result[-1]['acc'], result[-1]['epoch']))
     return result
@@ -885,11 +893,11 @@ def plot(path, output):
     # Reorder scope
     data['scope'] = pd.Categorical(data['scope'], categories=['local', 'mean pool', 'attn pool'])
     # Reorder model
-    data['model'] = pd.Categorical(data['model'], categories=['trained', 'random'])
+    data['mode'] = pd.Categorical(data['mode'], categories=['trained', 'random'])
     # Make variable to group model x run interaction for plotting multiple runs.
-    data['modelxrun'] = data.apply(lambda x: "{} {}".format(x['model'], x['run']), axis=1)
+    data['modelxrun'] = data.apply(lambda x: "{} {}".format(x['mode'], x['run']), axis=1)
 
-    g = ggplot(data, aes(x='layer id', y='score', color='model', linetype='model', shape='model')) + geom_point() +  geom_line(aes(group='modelxrun')) + \
+    g = ggplot(data, aes(x='layer id', y='score', color='mode', linetype='mode', shape='mode')) + geom_point() +  geom_line(aes(group='modelxrun')) + \
                             facet_wrap('~ method + scope') + \
                             theme(figure_size=(figure_size[0]*1.5, figure_size[1]*1.5))
     ggsave(g, '{}/plot.png'.format(output))
@@ -905,8 +913,8 @@ def plot_r2_partial():
     data['partial R²'] = (data['baseline'] - data['error']) / data['baseline']
     data['cor'] = abs(data['partial R²'])**0.5
     # Reorder model
-    data['model'] = pd.Categorical(data['model'], categories=['trained', 'random'])
-    g = ggplot(data, aes(x='layer id', y='cor', color='model', linetype='model', shape='model')) + geom_point() + geom_line() +\
+    data['mode'] = pd.Categorical(data['mode'], categories=['trained', 'random'])
+    g = ggplot(data, aes(x='layer id', y='cor', color='mode', linetype='mode', shape='mode')) + geom_point() + geom_line() +\
                             ylab("√R² (partial)")
     ggsave(g, 'fig/rnn-vgs/r2_partial.png')
 
@@ -916,7 +924,7 @@ def partialing(path='.'):
     data['layer id'] = [ order.index(x) for x in data['layer'] ]
     data['partial R²'] = (data['baseline'] - data['error']) / data['baseline']
     # Reorder model
-    data['model'] = pd.Categorical(data['model'], categories=['trained', 'random'])
+    data['mode'] = pd.Categorical(data['mode'], categories=['trained', 'random'])
     #
     pass
 
