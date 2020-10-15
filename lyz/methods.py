@@ -373,26 +373,37 @@ def ed_rsa_by_size(data, aid, trans_sim, text_sim, codes_sim, quantiles=DECILES)
         yield dict(quantile=quantiles[i], gt=qs[i-1], leq=qs[i], cor=cor_phoneme.item(), reference='phoneme', by_size=True)
         yield dict(quantile=quantiles[i], gt=qs[i-1], leq=qs[i], cor=cor_word.item(),  reference='word', by_size=True)
 
-def weighted_average_RSA(directory='.', layers=[], attention='linear', test_size=1/2,  attention_hidden_size=None, standardize=False, epochs=1, device='cpu'):
+def weighted_average_RSA(directory='.', layers=[], attention='linear', test_size=1/2,  cached_datadir='.',
+                         attention_hidden_size=None, standardize=False, epochs=1, device='cpu', splitseed=None):
     from sklearn.model_selection import train_test_split
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    splitseed = random.randint(0, 1024)
     result = []
     logging.info("Loading transcription data")
     data = pickle.load(open("{}/global_input.pkl".format(directory), "rb"))
     trans = data['ipa']
+    aid = data['audio_id']
     act = [ torch.tensor([item[:, :]]).float().to(device) for item in data['audio'] ]
+    if splitseed is None:
+        splitseed = random.randint(0, 1024)
+    try:
+        trans_sim_full = torch.load(Path(cached_datadir) / "trans_sim.pt")
+    except FileNotFoundError:
+        logging.info("Computing phoneme edit distances for transcriptions")
+        trans_sim_full = torch.tensor(U.pairwise(S.stringsim, trans)).double().to(device)
+        torch.save(trans_sim_full, Path(cached_datadir) / "trans_sim.pt")    
 
-    trans, trans_val, act, act_val = train_test_split(trans, act, test_size=test_size, random_state=splitseed)
+    index_train, index_val = train_test_split(range(len(aid)), test_size=test_size, random_state=splitseed)
+    trans_sim = trans_sim_full[index_train,:][:,index_train]
+    trans_sim_val = trans_sim_full[index_val,:][:,index_val]
+    act_val = [ act[i] for i in index_val]
+    act  = [ act[i] for i in index_train]
     if standardize:
         logging.info("Standardizing data")
         act, act_val = normalize(act, act_val)
     logging.info("Computing edit distances")
-    edit_sim = torch.tensor(U.pairwise(S.stringsim, trans)).float().to(device)
-    edit_sim_val = torch.tensor(U.pairwise(S.stringsim, trans_val)).float().to(device)
     logging.info("Training for input features")
-    this = train_wa(edit_sim, edit_sim_val, act, act_val, attention=attention, attention_hidden_size=None, epochs=epochs, device=device)
+    this = train_wa(trans_sim, trans_sim_val, act, act_val, attention=attention, attention_hidden_size=None, epochs=epochs, device=device)
     result.append({**this, 'mode': 'random', 'layer': 'mfcc'})
     result.append({**this, 'mode': 'trained', 'layer': 'mfcc'})
     del act, act_val
@@ -403,11 +414,12 @@ def weighted_average_RSA(directory='.', layers=[], attention='linear', test_size
             data = pickle.load(open("{}/global_{}_{}.pkl".format(directory, mode, layer), "rb"))
             logging.info("Training for {} {}".format(mode, layer))
             act = [ torch.tensor([item[:, :]]).float().to(device) for item in data[layer] ]
-            act, act_val = train_test_split(act, test_size=test_size, random_state=splitseed)
+            act_val = [ act[i] for i in index_val]
+            act  = [ act[i] for i in index_train]
             if standardize:
                 logging.info("Standardizing data")
                 act, act_val = normalize(act, act_val)
-            this = train_wa(edit_sim, edit_sim_val, act, act_val, attention=attention, attention_hidden_size=None, epochs=epochs, device=device)
+            this = train_wa(trans_sim, trans_sim_val, act, act_val, attention=attention, attention_hidden_size=None, epochs=epochs, device=device)
             result.append({**this, 'mode': mode, 'layer': layer})
             del act, act_val
             logging.info("Maximum correlation on val: {} at epoch {}".format(result[-1]['cor'], result[-1]['epoch']))
